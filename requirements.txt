@@ -1,0 +1,6 @@
+BabelDOC==0.6.4
+# BabelDOC 0.6.x uses APIs removed by these new major releases.
+bitstring>=4.3,<5
+PyMuPDF>=1.26.7,<2
+peewee>=3.17.8,<4
+openai>=1.59.3,<2

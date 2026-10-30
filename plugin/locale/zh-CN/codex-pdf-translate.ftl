@@ -1,0 +1,12 @@
+codex-pdf-translate-menu =
+    .label = Codex PDF 翻译
+codex-pdf-translate-progress =
+    .label = 显示翻译进度
+codex-pdf-translate-selected =
+    .label = 用当前模型翻译 PDF（保留版式）
+codex-pdf-translate-settings =
+    .label = 设置与任务进度
+codex-pdf-translate-doctor =
+    .label = 检查翻译环境
+codex-pdf-translate-cancel =
+    .label = 取消所有翻译任务

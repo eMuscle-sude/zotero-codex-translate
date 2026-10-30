@@ -1,0 +1,68 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul" xmlns:html="http://www.w3.org/1999/xhtml" flex="1">
+  <html:div id="codex-pdf-settings" style="font:14px/1.65 system-ui;max-width:900px;padding:12px;color-scheme:light dark">
+    <html:style>
+      #codex-pdf-settings h2 {margin:0;font-size:24px} #codex-pdf-settings h3 {margin:0 0 12px;font-size:17px}
+      #codex-pdf-settings p {margin:7px 0 14px} #codex-pdf-settings .ct-muted {opacity:.7;font-size:12px}
+      #codex-pdf-settings .ct-card {border:1px solid #8996a44d;border-radius:12px;padding:18px;margin:16px 0;background:#4488ee04}
+      #codex-pdf-settings .ct-grid {display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;align-items:center}
+      #codex-pdf-settings input:not([type=checkbox]),#codex-pdf-settings select {width:100%;padding:7px 9px;border:1px solid #8996a470;border-radius:6px;background:Canvas;color:CanvasText;font:inherit;box-sizing:border-box;min-width:0}
+      #codex-pdf-settings button {padding:6px 12px;border:1px solid #8996a470;border-radius:7px;background:Canvas;color:CanvasText;font:inherit;cursor:pointer}
+      #codex-pdf-settings button:disabled {opacity:.45;cursor:wait} #codex-pdf-settings button:hover:not(:disabled) {background:#4488ee15}
+      #codex-pdf-settings .ct-primary {background:#2875df;color:white;border-color:#2875df}
+      #codex-pdf-settings .ct-buttons {display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
+      #codex-pdf-settings .ct-status {padding:10px 12px;border-radius:7px;background:#4488ee0d;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+      #codex-pdf-settings [data-state=succeeded] {color:#208454} #codex-pdf-settings [data-state=failed] {color:#bf3e36}
+      #codex-pdf-settings [hidden] {display:none!important} #codex-pdf-settings .ct-badge {display:inline-block;padding:3px 10px;border-radius:20px;background:#4488ee15;color:#2875df;font-size:12px;margin:8px 0}
+      #codex-pdf-settings :focus-visible {outline:2px solid #4285f4;outline-offset:2px}
+    </html:style>
+    <html:h2>PDF 翻译 · 模型连接</html:h2>
+    <html:p class="ct-muted">选择模型，保留论文版式。原文、公式和插图由本机排版引擎处理。</html:p>
+    <html:div id="ct-active" class="ct-badge">正在读取连接…</html:div>
+    <html:section class="ct-card">
+      <html:h3>选择接入方式</html:h3>
+      <html:div class="ct-grid"><html:label for="ct-provider">模型连接</html:label><html:select id="ct-provider"><html:option value="codex">Codex 账号登录</html:option><html:option value="new-api">＋ 添加 API 连接</html:option></html:select></html:div>
+      <html:div id="ct-codex-panel">
+        <html:p class="ct-muted" style="margin-top:14px">使用 Codex CLI 的官方登录。可复用本机登录，或为本插件单独授权；独立登录与退出不会更改本机其他 Codex 登录。</html:p>
+        <html:div id="ct-account" class="ct-status" role="status">正在检查 Codex 登录状态…</html:div>
+        <html:div class="ct-buttons">
+          <html:button id="ct-use-shared" class="ct-primary" type="button">使用本机已登录账号</html:button><html:button id="ct-login" type="button">浏览器登录</html:button><html:button id="ct-device-login" type="button">设备码登录</html:button><html:button id="ct-refresh-login" type="button">刷新状态</html:button><html:button id="ct-cancel-login" type="button" hidden="true">取消登录</html:button><html:button id="ct-logout" type="button" hidden="true">退出插件登录</html:button>
+        </html:div>
+        <html:div id="ct-login-progress" class="ct-status" role="status" hidden="true"/>
+        <html:p id="ct-auth-link-row" hidden="true"><html:a id="ct-auth-link" href="#">打开 Codex 官方授权页面</html:a></html:p>
+        <html:div class="ct-grid" style="margin-top:18px"><html:label for="ct-model">Codex 模型</html:label><html:input id="ct-model" type="text" placeholder="留空使用 CLI 默认模型"/></html:div>
+        <html:div class="ct-buttons"><html:button id="ct-save-codex" type="button">保存 Codex 模型</html:button><html:span class="ct-muted">思考强度：中（medium）</html:span></html:div>
+      </html:div>
+      <html:div id="ct-api-panel" hidden="true">
+        <html:p class="ct-muted" style="margin-top:14px">支持 OpenAI Chat Completions 兼容接口。连接可单独保存和切换；论文只发送给任务创建时选定的服务。</html:p>
+        <html:div class="ct-grid">
+          <html:label for="ct-api-preset">快速填写</html:label><html:select id="ct-api-preset"><html:option value="custom">自定义兼容接口</html:option><html:option value="openai">OpenAI</html:option><html:option value="deepseek">DeepSeek</html:option><html:option value="siliconflow">硅基流动</html:option><html:option value="ollama">本机 Ollama</html:option></html:select>
+          <html:label for="ct-api-name">连接名称</html:label><html:input id="ct-api-name" type="text" placeholder="例如：我的翻译模型" maxlength="80"/>
+          <html:label for="ct-api-url">服务地址</html:label><html:input id="ct-api-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off"/>
+          <html:label for="ct-api-model">模型名称</html:label><html:input id="ct-api-model" type="text" placeholder="填写服务商提供的模型 ID" maxlength="200"/>
+          <html:label for="ct-api-key">API Key</html:label><html:input id="ct-api-key" type="password" placeholder="填写后加密保存到本机" autocomplete="new-password"/>
+          <html:span/><html:label class="ct-muted"><html:input id="ct-show-key" type="checkbox"/> 显示本次输入的密钥</html:label>
+          <html:label for="ct-api-tokens">最大输出长度</html:label><html:input id="ct-api-tokens" type="number" min="1024" max="32000" step="1024" value="8192"/>
+        </html:div>
+        <html:p id="ct-api-key-state" class="ct-muted">密钥只保存在本机 Windows 用户加密存储中，不写入任务记录或源码。</html:p>
+        <html:div class="ct-buttons"><html:button id="ct-save-api" class="ct-primary" type="button">保存并使用此 API</html:button><html:button id="ct-remove-api" type="button" hidden="true">删除此连接及密钥</html:button></html:div>
+      </html:div>
+      <html:div class="ct-buttons" style="border-top:1px solid #8996a42a;padding-top:16px;margin-top:20px"><html:button id="ct-test" type="button">测试当前连接</html:button><html:button id="ct-cancel-test" type="button" hidden="true">取消测试</html:button><html:span class="ct-muted">测试会发送一句短文本，使用对应服务额度。</html:span></html:div>
+      <html:div id="ct-test-result" class="ct-status" role="status" hidden="true"/>
+      <html:div id="ct-connection-feedback" role="status" style="margin-top:12px;overflow-wrap:anywhere"/>
+    </html:section>
+    <html:section class="ct-card">
+      <html:h3>阅读与输出</html:h3>
+      <html:div class="ct-grid">
+        <html:label for="ct-in">原文语言</html:label><html:input id="ct-in" type="text" value="en"/>
+        <html:label for="ct-out">译文语言</html:label><html:input id="ct-out" type="text" value="zh"/>
+        <html:label for="ct-mode">输出文件</html:label><html:select id="ct-mode"><html:option value="both">中文 PDF ＋ 中英对照 PDF</html:option><html:option value="mono">仅中文 PDF</html:option><html:option value="dual">仅中英对照 PDF</html:option></html:select>
+        <html:label for="ct-pages">翻译页码</html:label><html:input id="ct-pages" type="text" placeholder="留空为全文；试译可填写 1-2"/>
+      </html:div>
+      <html:p style="margin-top:14px"><html:label><html:input id="ct-auto" type="checkbox"/> 新增 PDF 附件后自动翻译</html:label></html:p>
+      <html:details><html:summary>本机运行环境</html:summary><html:div class="ct-grid" style="margin-top:12px"><html:label for="ct-python">Python 路径</html:label><html:input id="ct-python" type="text" placeholder="运行 setup.ps1 自动配置"/><html:label for="ct-codex">Codex CLI 路径</html:label><html:input id="ct-codex" type="text" placeholder="自动查找 codex.exe；仅 API 接入时可留空"/></html:div></html:details>
+      <html:div class="ct-buttons"><html:button id="ct-save" type="button">保存阅读与输出设置</html:button><html:span id="ct-feedback" role="status"/></html:div>
+      <html:p class="ct-muted" style="margin-top:14px">最多两批并行、自动恢复和重复任务保护始终启用。复杂版面仍需核查；扫描件需先 OCR。切换连接只影响新建任务。</html:p>
+    </html:section>
+    <html:section class="ct-card"><html:h3>任务进度</html:h3><html:div class="ct-buttons"><html:button id="ct-folder" type="button">打开任务目录</html:button><html:button id="ct-cancel" type="button">取消全部翻译</html:button></html:div><html:div id="ct-jobs" aria-live="polite"/></html:section>
+  </html:div>
+</vbox>

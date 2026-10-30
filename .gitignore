@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+tmp/
+output/
+dist/
+*.log
+credentials/
+codex-auth/
+control/
+connection-tests/
+connections.json
+config.json
+auth.json
+.env*
+*.bin
+*.sqlite*
+*.pdf

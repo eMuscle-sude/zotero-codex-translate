@@ -1,0 +1,12 @@
+codex-pdf-translate-menu =
+    .label = Codex PDF Translation
+codex-pdf-translate-progress =
+    .label = Show translation progress
+codex-pdf-translate-selected =
+    .label = Translate PDF with selected model (preserve layout)
+codex-pdf-translate-settings =
+    .label = Settings and translation jobs
+codex-pdf-translate-doctor =
+    .label = Check translation environment
+codex-pdf-translate-cancel =
+    .label = Cancel all translation jobs
