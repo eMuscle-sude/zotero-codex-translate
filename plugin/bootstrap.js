@@ -14,6 +14,7 @@ async function startup({ id, version, rootURI }) {
     Services.scriptloader.loadSubScript(rootURI + "content/identity.js", scope, "UTF-8");
     Services.scriptloader.loadSubScript(rootURI + "content/connection-client.js", scope, "UTF-8");
     Services.scriptloader.loadSubScript(rootURI + "content/progress.js", scope, "UTF-8");
+    Services.scriptloader.loadSubScript(rootURI + "content/metadata.js", scope, "UTF-8");
     Services.scriptloader.loadSubScript(rootURI + "content/translate.js", scope, "UTF-8");
     Zotero.CodexPDFTranslate = scope.CodexPDFTranslate;
     await Zotero.CodexPDFTranslate.startup();

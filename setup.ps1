@@ -40,7 +40,8 @@ if (Test-Path -LiteralPath $taskConfigPath) {
     if (-not $taskCodexPath -and $taskOldConfig.codexPath) { $taskConfig.codexPath = $taskOldConfig.codexPath }
     Copy-Item -LiteralPath $taskConfigPath -Destination ($taskConfigPath + '.bak') -Force
 }
-$taskConfig | ConvertTo-Json | Set-Content -LiteralPath $taskConfigPath -Encoding utf8
+$taskConfigJson = $taskConfig | ConvertTo-Json
+[System.IO.File]::WriteAllText($taskConfigPath, $taskConfigJson, [System.Text.UTF8Encoding]::new($false))
 Write-Output ('Runtime ready: ' + $taskConfigPath)
 Write-Output 'Choose Codex sign-in or an API connection in the plugin settings. Codex CLI is optional for API-only use.'
 
@@ -62,8 +63,8 @@ if ($InstallPlugin) {
     }
     $ProfilePath = (Resolve-Path -LiteralPath $ProfilePath).Path
     if (-not (Test-Path -LiteralPath (Join-Path $ProfilePath 'prefs.js'))) { throw 'Not a Zotero profile (prefs.js missing).' }
-    $taskXpi = Join-Path $taskRoot 'zotero-codex-translate-0.4.0.xpi'
-    if (-not (Test-Path -LiteralPath $taskXpi)) { $taskXpi = Join-Path $taskRoot 'dist\zotero-codex-translate-0.4.0.xpi' }
+    $taskXpi = Join-Path $taskRoot 'zotero-codex-translate-0.6.2.xpi'
+    if (-not (Test-Path -LiteralPath $taskXpi)) { $taskXpi = Join-Path $taskRoot 'dist\zotero-codex-translate-0.6.2.xpi' }
     if (-not (Test-Path -LiteralPath $taskXpi)) { throw 'XPI missing. Run scripts/build.py first.' }
     $taskExtensions = Join-Path $ProfilePath 'extensions'
     New-Item -ItemType Directory -Path $taskExtensions -Force | Out-Null

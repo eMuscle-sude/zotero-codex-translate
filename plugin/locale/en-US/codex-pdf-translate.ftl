@@ -10,3 +10,7 @@ codex-pdf-translate-doctor =
     .label = Check translation environment
 codex-pdf-translate-cancel =
     .label = Cancel all translation jobs
+codex-pdf-workbench =
+    .label = Open PDF Translation Workbench
+codex-pdf-workbench-selected =
+    .label = Open Workbench and Translate PDF

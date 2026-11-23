@@ -26,6 +26,14 @@ def api_fixture():
     state = {"requests": [], "mode": "ok"}
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
+        def do_GET(self):
+            state["requests"].append({"path": self.path, "authorization": self.headers.get("Authorization")})
+            if state["mode"] == "redirect":
+                self.send_response(302); self.send_header("Location", state["base"] + "/other"); self.end_headers(); return
+            raw = json.dumps({"data": [{"id": "z-model"}, {"id": "a-model"}, {"id": "z-model"},
+                                       {"id": self.headers.get("Authorization")}, None]}).encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(raw))); self.end_headers()
+            self.wfile.write(raw)
         def do_POST(self):
             data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state["requests"].append({"path": self.path, "authorization": self.headers.get("Authorization"), "payload": data})
@@ -54,6 +62,37 @@ def api_fixture():
 
 
 class ProviderTest(unittest.TestCase):
+    def test_api_model_discovery_lists_ids_without_saving_or_forwarding_the_key(self):
+        with tempfile.TemporaryDirectory() as directory, api_fixture() as server:
+            manager = connections.Connections(Path(directory))
+            values = {"baseUrl": server["base"], "apiKey": "mock-model-key"}
+            self.assertEqual(manager.action("/api/models", values), {"models": ["a-model", "z-model"]})
+            self.assertEqual(server["requests"], [{"path": "/v1/models", "authorization": "Bearer mock-model-key"}])
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            server["mode"] = "redirect"
+            with self.assertRaisesRegex(providers.ProviderError, "HTTP 302"):
+                manager.action("/api/models", values)
+            self.assertEqual(len(server["requests"]), 2)
+
+    def test_codex_access_token_is_sent_to_isolated_cli_stdin_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = connections.Connections(Path(directory), "codex.exe")
+            account = {"available": True, "loggedIn": True, "kind": "chatgpt"}
+            with patch.object(connections, "resolve_codex", return_value="codex.exe"), \
+                 patch.object(connections.subprocess, "Popen") as launch, \
+                 patch.object(manager, "probe_account", return_value=account) as probe:
+                process = launch.return_value
+                process.returncode = 0
+                result = manager.action("/codex/secret", {"mode": "token", "secret": "mock-access-token"})
+                self.assertIn("--with-access-token", launch.call_args.args[0])
+                self.assertNotIn("mock-access-token", launch.call_args.args[0])
+                self.assertEqual(launch.call_args.kwargs["env"]["CODEX_HOME"], str(Path(directory) / "codex-auth"))
+                self.assertEqual(process.communicate.call_args.kwargs["input"], b"mock-access-token\n")
+                probe.assert_called_once_with("isolated", timeout=6)
+                self.assertEqual(result["connections"]["codexMode"], "isolated")
+                self.assertNotIn("mock-access-token", json.dumps(result))
+                self.assertNotIn("mock-access-token", (Path(directory) / "connections.json").read_text(encoding="utf-8"))
+
     def test_url_validation_and_no_credential_in_url(self):
         self.assertEqual(providers.normalize_url(" https://example.org/v1/chat/completions/ "), "https://example.org/v1")
         for url in ("http://example.org/v1", "https://user:secret@example.org/v1", "https://example.org/v1?key=secret", "file:///x", "https://example.org:bad"):
@@ -100,6 +139,25 @@ class ProviderTest(unittest.TestCase):
             config=providers.config_for_connection(manager.value,Path(directory))
             self.assertEqual(config["provider"],"api")
             self.assertEqual(providers.api_key_for(config),"")
+
+    def test_selected_effort_persists_and_api_defaults_preserve_legacy_requests(self):
+        with tempfile.TemporaryDirectory() as directory, api_fixture() as remote:
+            root = Path(directory)
+            manager = connections.Connections(root)
+            self.assertEqual(providers.config_for_connection(manager.value, root)["reasoningEffort"], "medium")
+            manager.action("/codex/model", {"model": "codex-test", "reasoningEffort": "high"})
+            self.assertEqual(providers.config_for_connection(connections.Connections(root).value, root)["reasoningEffort"], "high")
+            with self.assertRaises(ValueError):
+                manager.action("/codex/model", {"reasoningEffort": "invalid"})
+            manager.save_api({"baseUrl": remote["base"], "model": "api-test", "reasoningEffort": "low"})
+            config = providers.config_for_connection(connections.Connections(root).value, root)
+            prompt = worker.translation_prompt([{"messages": [{"role": "user", "content": "test"}]}])
+            providers.api_completion(config, prompt, 1, 3, lambda: False)
+            self.assertEqual(remote["requests"][-1]["payload"]["reasoning_effort"], "low")
+            config.pop("apiReasoningEffort")
+            config["reasoningEffort"] = "medium"  # Legacy API job inherited this Codex-only field.
+            providers.api_completion(config, prompt, 1, 3, lambda: False)
+            self.assertNotIn("reasoning_effort", remote["requests"][-1]["payload"])
 
     @unittest.skipUnless(os.name=="nt","Windows user encryption")
     def test_api_transport_preserves_mapping_and_never_serializes_keys(self):

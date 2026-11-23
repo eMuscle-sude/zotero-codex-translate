@@ -64,6 +64,10 @@ class WorkerTest(unittest.TestCase):
             self.assertIn("--ignore-user-config", command)
             self.assertIn('model_reasoning_effort="medium"', command)
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+            command = worker.codex_command("codex.exe", Path(directory), Path("schema"), Path("answer"),
+                                           "test-model", {"reasoningEffort": "high"})
+            self.assertIn('model_reasoning_effort="high"', command)
+            self.assertNotIn('model_reasoning_effort="medium"', command)
 
     def test_proxy_auth_batching_cache_and_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -237,6 +241,22 @@ class WorkerTest(unittest.TestCase):
                     self.assertFalse(second)
             with worker.worker_lease(Path(directory)) as after_release:
                 self.assertTrue(after_release)
+
+
+class CodexDiscoveryTest(unittest.TestCase):
+    def test_removed_versioned_path_falls_back_to_current_cli(self):
+        with patch.object(worker.shutil, "which", return_value="current-codex.exe"):
+            self.assertEqual(worker.resolve_codex("C:/removed-version/codex.exe"), "current-codex.exe")
+
+    def test_existing_custom_binary_is_preserved_and_desktop_upgrade_is_discovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            custom = root / "custom-codex.exe"; custom.touch()
+            current = root / "OpenAI/Codex/bin/new-version/codex.exe"
+            current.parent.mkdir(parents=True); current.touch()
+            with patch.object(worker.shutil, "which", return_value=None), patch.dict(worker.os.environ, {"LOCALAPPDATA": directory}):
+                self.assertEqual(worker.resolve_codex(str(custom)), str(custom.resolve()))
+                self.assertEqual(worker.resolve_codex(str(root / "removed-codex.exe")), str(current))
 
 
 if __name__ == "__main__":

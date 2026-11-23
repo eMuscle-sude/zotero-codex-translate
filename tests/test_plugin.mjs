@@ -6,6 +6,7 @@ import test from "node:test";
 
 function fixture() {
   const records = new Map();
+  const preferences = new Map();
   let executable;
   const progressWindows = [];
   function ProgressWindow() {
@@ -24,7 +25,8 @@ function fixture() {
     Zotero: {
       isWin: true,
       getMainWindow: () => null,
-      Prefs: { get: () => undefined },
+      Prefs: { get: key => preferences.get(key), set: (key, value) => preferences.set(key, value) },
+      debug: () => {},
       File: { pathToFile: p => p },
       ProgressWindow,
       logError: e => { throw e; },
@@ -32,11 +34,15 @@ function fixture() {
     IOUtils: {
       exists: async p => /pythonw?\.exe$/i.test(p),
       readJSON: async p => records.get(p),
+      readUTF8: async p => {
+        if (!records.has(p)) throw Object.assign(new Error("Missing file"), { name: "NotFoundError" });
+        return records.get(p);
+      },
       writeJSON: async (p, value) => records.set(p, value),
       writeUTF8: async (p, value) => records.set(p, value),
       remove: async p => records.delete(p),
     },
-    PathUtils: path.win32,
+    PathUtils: { ...path.win32, filename: path.win32.basename },
     Cc: { "@mozilla.org/process/util;1": { createInstance: () => ({
       init: file => { executable = file; }, runwAsync: () => {}, isRunning: false,
     }) } },
@@ -47,9 +53,11 @@ function fixture() {
   vm.runInContext(fs.readFileSync(new URL("../plugin/content/connection-client.js", import.meta.url), "utf8"), scope);
   vm.runInContext(fs.readFileSync(new URL("../plugin/content/identity.js", import.meta.url), "utf8"), scope);
   vm.runInContext(fs.readFileSync(new URL("../plugin/content/progress.js", import.meta.url), "utf8"), scope);
+  vm.runInContext(fs.readFileSync(new URL("../plugin/content/metadata.js", import.meta.url), "utf8"), scope);
   vm.runInContext(fs.readFileSync(new URL("../plugin/content/translate.js", import.meta.url), "utf8"), scope);
   const api = scope.CodexPDFTranslate;
   api.settings = { pythonPath: "C:\\runtime\\Scripts\\python.exe" };
+  api.stateDir = "C:\\state";
   api.workerPath = "C:\\worker.py";
   return { api, scope, records, progressWindows, identity: scope.CodexPDFIdentity, model: scope.CodexPDFProgress.model, executable: () => executable };
 }
@@ -179,8 +187,9 @@ function libraryFixture() {
   } };
   f.api.jobsDir = "C:\\jobs";
   f.api.stateDir = "C:\\state";
+  const tick = f.api.tick.bind(f.api);
   f.api.tick = async () => {};
-  return { ...f, files, items, attachment, imports: () => created };
+  return { ...f, files, items, attachment, tick, imports: () => created };
 }
 
 test("Concurrent double clicks and identical PDFs under another name create one task", async () => {
@@ -188,6 +197,46 @@ test("Concurrent double clicks and identical PDFs under another name create one 
   await Promise.all([f.api.translateItems([f.items.get(1)]), f.api.translateItems([f.items.get(1)]), f.api.translateItems([f.items.get(2)])]);
   assert.equal(f.api.jobs.size, 1);
   assert.match(f.api.lastUINotice, /没有重复启动/);
+});
+
+test("External PDF jobs reuse identical files and coexist with Zotero attachment jobs", async () => {
+  const f = libraryFixture();
+  f.scope.IOUtils.stat = async () => ({ type: "regular" });
+  const [first, second] = await Promise.all([
+    f.api.translateFiles(["C:\\source.pdf", "C:\\missing.pdf"], "1", "mono"),
+    f.api.translateFiles(["C:\\other-name.pdf"], "1", "mono"),
+  ]);
+  assert.equal(first.results.length, 1);
+  assert.equal(first.errors.length, 1);
+  const job = first.results[0].job;
+  assert.equal(job.request.localFile, true);
+  assert.equal(job.request.sourceItemID, undefined);
+  assert.ok(second.results[0].reused);
+  assert.equal(second.results[0].job.request.id, job.request.id);
+  await f.api.translateItems([f.items.get(1)]);
+  assert.equal(f.api.jobs.size, 2);
+});
+
+test("Local translation completion leaves outputs on disk and bypasses Zotero import", async () => {
+  const f = libraryFixture();
+  f.scope.IOUtils.stat = async () => ({ type: "regular" });
+  const { results } = await f.api.translateFiles(["C:\\source.pdf"], "", "both");
+  const job = results[0].job;
+  const state = { state: "succeeded", progress: 100, outputs: [
+    { kind: "mono", path: "C:\\done-mono.pdf" }, { kind: "dual", path: "C:\\done-dual.pdf" },
+  ] };
+  for (const entry of state.outputs) f.files.set(entry.path, entry.kind);
+  await f.scope.IOUtils.writeJSON(path.win32.join(job.directory, "status.json"), state);
+  job.state = "running";
+  f.api.importOutputs = async () => assert.fail("external files must not enter the Zotero library");
+  await f.tick();
+  assert.equal(job.state, "succeeded");
+  assert.equal(f.model(job).percent, 100);
+  const reused = await f.api.translateFiles(["C:\\other-name.pdf"], "", "both");
+  assert.equal(reused.results[0].job.request.id, job.request.id);
+  f.files.delete(state.outputs[0].path);
+  const regenerated = await f.api.translateFiles(["C:\\source.pdf"], "", "both");
+  assert.equal(regenerated.results[0].reused, false);
 });
 
 test("Existing readable translations prevent model work; a missing variant generates only that variant", async () => {
@@ -309,20 +358,23 @@ test("An existing variant removed during generation cannot be reported as a comp
   assert.match(job.message, /只补缺少/);
 });
 
-test("New jobs snapshot the selected API without plaintext keys and recovery keeps the original provider", async () => {
+test("Jobs snapshot model effort and provider, and automatic recovery keeps both", async () => {
   const f = libraryFixture();
+  f.api.connectionSettings = { selected: "codex", codexReasoningEffort: "high", apis: [] };
   await f.api.translateItems([f.items.get(1)]);
   const old = [...f.api.jobs.values()][0];
-  f.api.connectionSettings = { selected: "api-test", apis: [{ id: "api-test", name: "Test API", baseUrl: "https://example.org/v1", model: "unit-model", credentialRef: "reference-only" }] };
+  f.api.connectionSettings = { selected: "api-test", apis: [{ id: "api-test", name: "Test API", baseUrl: "https://example.org/v1", model: "unit-model", reasoningEffort: "low", credentialRef: "reference-only" }] };
   const config = f.api.config();
   assert.equal(config.provider, "api");
   assert.equal(config.model, "unit-model");
+  assert.equal(config.apiReasoningEffort, "low");
   assert.equal(config.credentialRef, "reference-only");
   assert.equal(config.apiKey, undefined);
   assert.equal(config.parallelBatches, 2);
   old.state = "failed"; old.message = "connection timed out";
   await f.api.requeue(old, true);
   assert.equal(old.request.config.provider, "codex");
+  assert.equal(old.request.config.reasoningEffort, "high");
   assert.equal(old.request.config.baseUrl, undefined);
 });
 
@@ -336,4 +388,100 @@ test("Connection requests suppress request-body logging when API keys are submit
   await client.raw("POST", "/api/save", { apiKey: "unit-only-fake-secret" });
   assert.equal(captured.logBodyLength, 0);
   assert.equal(captured.debug, false);
+});
+
+function metadataFixture(field = "abstractNote", value = "Before selected text after") {
+  const f = fixture();
+  let stored = value, saved;
+  const item = { id: 123, libraryID: 1, itemTypeID: 2, isRegularItem: () => true,
+    getField: () => stored, setField: (name, text) => { stored = text; },
+    saveTx: async options => { saved = options; } };
+  const owner = { localName: field === "abstractNote" ? "abstract-box" : "item-pane-header", item, editable: true, _titleFieldID: 7 };
+  const input = { value, selectionStart: 7, selectionEnd: 20 };
+  const editable = { ref: input, readOnly: false, isConnected: true, value,
+    closest: () => owner, getAttribute: () => field };
+  const target = { closest: () => editable };
+  f.scope.Zotero.Libraries = { get: () => ({ editable: true }) };
+  f.scope.Zotero.ItemFields = { getLocalizedString: () => field };
+  return { ...f, module: f.scope.CodexPDFMetadata, item, owner, editable, input, target,
+    stored: () => stored, saved: () => saved, setStored: value => { stored = value; } };
+}
+
+test("Runtime configuration accepts a PowerShell BOM and empty Python preferences", async () => {
+  const f = fixture();
+  f.api.setPref("pythonPath", "");
+  f.records.set("C:\\state\\config.json", '\uFEFF' + JSON.stringify({ pythonPath: "C:\\环境\\Scripts\\python.exe", codexPath: "C:\\new-codex.exe" }));
+  assert.equal(await f.api.resolvePython(), "C:\\环境\\Scripts\\pythonw.exe");
+  assert.equal(f.api.settings.codexPath, "C:\\new-codex.exe");
+  assert.equal(f.api.getPref("pythonPath", ""), "C:\\环境\\Scripts\\python.exe");
+  f.records.set("C:\\state\\config.json", JSON.stringify({ pythonPath: "C:\\updated\\Scripts\\python.exe" }));
+  f.api.setPref("pythonPath", "C:\\removed\\python.exe");
+  f.scope.IOUtils.exists = async p => p.startsWith("C:\\updated\\");
+  assert.equal(await f.api.resolvePython(), "C:\\updated\\Scripts\\pythonw.exe");
+});
+
+test("A standard installed runtime is discovered when no configured Python is usable", async () => {
+  const f = fixture(); f.api.settings = {};
+  f.api.setPref("pythonPath", "C:\\missing\\python.exe");
+  f.scope.IOUtils.exists = async p => p.startsWith("C:\\state\\runtime\\Scripts\\");
+  assert.equal(await f.api.resolvePython(), "C:\\state\\runtime\\Scripts\\pythonw.exe");
+  f.scope.IOUtils.exists = async () => false;
+  await assert.rejects(f.api.resolvePython(), /未找到可用的 Python/);
+});
+
+test("A failed launcher notifies once, freezes elapsed time and does not retry forever", async () => {
+  const f = fixture(); f.api.settings = {}; f.scope.IOUtils.exists = async () => false;
+  f.api.reuseCompleted = async () => false;
+  const alerts = []; f.api.notify = (...args) => alerts.push(args);
+  const job = { request: { id: "runtime-failure", title: "PDF", createdAt: Date.now() }, directory: "C:\\job", state: "queued" };
+  f.api.jobs.set(job.request.id, job);
+  await f.api.tick(); await f.api.tick();
+  assert.equal(alerts.length, 1);
+  assert.equal(job.state, "failed");
+  assert.equal(job.retryable, false);
+  assert.ok(job.finishedAt);
+  assert.equal(f.api.canRecover(job), false);
+});
+
+test("Metadata replaces exactly the captured selection and records a Zotero undo action", async () => {
+  const f = metadataFixture();
+  const snapshot = f.module.snapshot(f.target);
+  assert.equal(snapshot.text, "selected text");
+  assert.equal(snapshot.label, "摘要");
+  await f.module.replace(snapshot, "所选译文");
+  assert.equal(f.stored(), "Before 所选译文 after");
+  assert.equal(f.saved().undoAction, "undo-action-edit-field");
+  assert.equal(f.editable.value, "Before 所选译文 after");
+});
+
+test("A title without a text selection translates the entire field, preserving literal markup", async () => {
+  const f = metadataFixture("title", "A <i>sensor</i>");
+  f.input.selectionStart = f.input.selectionEnd = 0;
+  const snapshot = f.module.snapshot(f.target);
+  assert.equal(snapshot.selected, false);
+  assert.equal(snapshot.text, "A <i>sensor</i>");
+  await f.module.replace(snapshot, "一种 <i>传感器</i>");
+  assert.equal(f.stored(), "一种 <i>传感器</i>");
+});
+
+test("Metadata cannot overwrite a changed field, switched item, deleted item, or read-only library", async () => {
+  for (const change of [f => { f.input.value = "user edit"; }, f => { f.owner.item = { id: 456 }; },
+    f => { f.item.deleted = true; }, f => { f.editable.readOnly = true; },
+    f => { f.setStored("external edit"); }, f => { f.scope.Zotero.Libraries.get = () => ({ editable: false }); }]) {
+    const f = metadataFixture();
+    const snapshot = f.module.snapshot(f.target);
+    change(f);
+    await assert.rejects(f.module.replace(snapshot, "译文"));
+    assert.equal(f.saved(), undefined);
+  }
+});
+
+test("A failed metadata save restores the in-memory field and does not replace the visible text", async () => {
+  const f = metadataFixture();
+  const snapshot = f.module.snapshot(f.target);
+  f.item.saveTx = async () => { throw new Error("save failed"); };
+  await assert.rejects(f.module.replace(snapshot, "译文"), /save failed/);
+  assert.equal(f.stored(), snapshot.storedValue);
+  assert.equal(f.editable.value, snapshot.value);
+  await assert.rejects(f.module.replace(snapshot, " "), /不能为空/);
 });

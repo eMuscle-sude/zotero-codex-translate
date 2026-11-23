@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+        xmlns:html="http://www.w3.org/1999/xhtml" title="PDF 翻译工作台" width="1060" height="740">
+  <html:link rel="stylesheet" href="chrome://codex-pdf-translate/content/workbench.css"/>
+  <script src="chrome://zotero/content/include.js"/>
+  <script src="chrome://codex-pdf-translate/content/preferences.js"/>
+  <script src="chrome://codex-pdf-translate/content/workbench.js"/>
+  <html:main id="ct-workbench">
+    <html:header class="wb-header">
+      <html:h1 id="wb-title">PDF 翻译工作台</html:h1>
+      <html:button id="wb-model-jump" class="wb-quiet" type="button">模型连接</html:button>
+    </html:header>
+    <html:div class="wb-layout">
+      <html:div class="wb-main">
+        <html:section aria-label="添加本机 PDF">
+          <html:div id="wb-drop" class="wb-drop">
+            <html:h2>拖入 PDF</html:h2>
+            <html:button type="button" id="wb-browse">选择文件</html:button>
+          </html:div>
+        <html:ul id="wb-files" aria-label="待提交的 PDF"/>
+        <html:div class="wb-submit">
+          <html:fieldset class="wb-output">
+            <html:legend>输出文件</html:legend>
+            <html:div class="wb-segments">
+              <html:label><html:input type="radio" name="wb-output" value="both" checked="checked"/><html:span>译文和双语</html:span></html:label>
+              <html:label><html:input type="radio" name="wb-output" value="mono"/><html:span>仅译文</html:span></html:label>
+              <html:label><html:input type="radio" name="wb-output" value="dual"/><html:span>仅双语</html:span></html:label>
+            </html:div>
+          </html:fieldset>
+          <html:label class="wb-pages-label" for="wb-pages">翻译页码<html:input id="wb-pages" placeholder="全文，或填 1-3,5"/></html:label>
+          <html:button id="wb-start" type="button" class="wb-primary" disabled="disabled">开始翻译</html:button>
+        </html:div>
+        <html:div id="wb-feedback" role="status"/>
+        </html:section>
+        <html:section class="wb-history" aria-labelledby="wb-tasks-title">
+          <html:div class="wb-heading">
+            <html:h2 id="wb-tasks-title">翻译任务</html:h2>
+            <html:button id="wb-folder" type="button" class="wb-quiet">任务目录</html:button>
+          </html:div>
+          <html:fieldset class="wb-filters" aria-label="筛选翻译任务">
+            <html:div class="wb-segments">
+              <html:label><html:input type="radio" name="wb-filter" value="all" checked="checked"/><html:span id="wb-count-all">全部</html:span></html:label>
+              <html:label><html:input type="radio" name="wb-filter" value="active"/><html:span id="wb-count-active">进行中</html:span></html:label>
+              <html:label><html:input type="radio" name="wb-filter" value="done"/><html:span id="wb-count-done">已完成</html:span></html:label>
+              <html:label><html:input type="radio" name="wb-filter" value="inactive"/><html:span id="wb-count-inactive">失败或取消</html:span></html:label>
+            </html:div>
+          </html:fieldset>
+          <html:p id="wb-empty" class="wb-empty"/>
+          <html:div id="wb-jobs"/>
+          <html:button type="button" id="wb-more" class="wb-quiet" hidden="hidden">显示更多任务</html:button>
+        </html:section>
+      </html:div>
+      <html:aside id="wb-connections" aria-label="模型连接"/>
+    </html:div>
+  </html:main>
+</window>

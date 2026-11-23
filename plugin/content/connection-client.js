@@ -20,16 +20,13 @@ var CodexPDFConnections = {
           catch (error) { this.url = ""; }
         }
         this.starting = (async () => {
+          const python = await api.resolvePython();
           const directory = PathUtils.join(api.stateDir, "control", Zotero.Utilities.randomString(16));
           await IOUtils.makeDirectory(directory, { ignoreExisting: true });
           this.token = Services.uuid.generateUUID().toString().replace(/[^a-f0-9]/gi, "") + Services.uuid.generateUUID().toString().replace(/[^a-f0-9]/gi, "");
           const request = PathUtils.join(directory, "request.json");
           await IOUtils.writeJSON(request, { stateDir: api.stateDir, token: this.token,
             codexPath: api.getPref("codexPath", api.settings.codexPath || "") });
-          let python = api.getPref("pythonPath", api.settings.pythonPath || "");
-          if (!python || !await IOUtils.exists(python)) throw new Error("请先运行 setup.ps1 配置 Python 环境。");
-          if (Zotero.isWin) python = python.replace(/python\.exe$/i, "pythonw.exe");
-          if (!await IOUtils.exists(python)) throw new Error("未找到无窗口 Python 启动器，请重新运行 setup.ps1。");
           const process = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
           process.init(Zotero.File.pathToFile(python));
           const args = ["-X", "utf8", api.connectionPath, "--request", request];

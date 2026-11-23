@@ -125,17 +125,31 @@ class CredentialVault:
         self._path(reference).unlink(missing_ok=True)
 
 
+CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
+API_EFFORTS = ("provider-default", "none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def reasoning_effort(config: dict) -> str:
+    if config.get("provider", "codex") == "api":
+        value = config.get("apiReasoningEffort")
+        return value if value in API_EFFORTS else "provider-default"
+    value = config.get("reasoningEffort")
+    return value if value in CODEX_EFFORTS else "medium"
+
+
 def load_connections(state_dir: Path) -> dict:
     try:
         value = json.loads((Path(state_dir) / "connections.json").read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         value = {}
-    return {"version": 1, "selected": "codex", "codexMode": "shared", "codexModel": "", "apis": [], **value}
+    return {"version": 1, "selected": "codex", "codexMode": "shared", "codexModel": "",
+            "codexReasoningEffort": "medium", "apis": [], **value}
 
 
 def config_for_connection(value: dict, state_dir: Path, codex_path="") -> dict:
     if value.get("selected", "codex") == "codex":
-        result = {"provider": "codex", "providerName": "Codex", "model": value.get("codexModel", ""), "codexPath": codex_path}
+        result = {"provider": "codex", "providerName": "Codex", "model": value.get("codexModel", ""),
+                  "codexPath": codex_path, "reasoningEffort": reasoning_effort({"reasoningEffort": value.get("codexReasoningEffort")})}
         if value.get("codexMode") == "isolated":
             result["codexHome"] = str(Path(state_dir) / "codex-auth")
         return result
@@ -144,7 +158,8 @@ def config_for_connection(value: dict, state_dir: Path, codex_path="") -> dict:
         raise ProviderError("请先保存 API 连接，或选择 Codex。")
     return {"provider": "api", "providerName": profile["name"], "model": profile["model"],
             "baseUrl": profile["baseUrl"], "credentialRef": profile.get("credentialRef", ""),
-            "maxOutputTokens": profile.get("maxOutputTokens", 8192), "stateDir": str(state_dir)}
+            "maxOutputTokens": profile.get("maxOutputTokens", 8192), "stateDir": str(state_dir),
+            "apiReasoningEffort": profile.get("reasoningEffort", "provider-default")}
 
 
 def codex_environment(config: dict) -> dict:
@@ -200,6 +215,9 @@ def api_completion(config: dict, prompt: str, count: int, timeout: int, cancelle
     token_parameter = "max_completion_tokens" if re.match(r"^(?:gpt-[5-9]|o[1-9])", model, re.I) else "max_tokens"
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False,
                token_parameter: max(1024, min(int(config.get("maxOutputTokens", 8192)), 32000))}
+    effort = reasoning_effort({**config, "provider": "api"})
+    if effort != "provider-default":
+        payload["reasoning_effort"] = effort
     try:
         response = asyncio.run(_api_post(base + "/chat/completions", key, payload, timeout, cancelled))
     except asyncio.CancelledError:
@@ -218,6 +236,8 @@ def api_completion(config: dict, prompt: str, count: int, timeout: int, cancelle
             detail = detail.replace(key, "[已隐藏密钥]")
         if 300 <= response.status_code < 400:
             raise ProviderError("API 返回了重定向；为避免转发密钥，请直接填写最终服务地址。")
+        if effort != "provider-default" and response.status_code in {400, 422} and "reasoning_effort" in detail.lower():
+            raise ProviderError(f"模型拒绝了思考强度 {effort}。请选择模型支持的档位或「服务商默认」。{detail[:280]}")
         raise ProviderError(f"API HTTP {response.status_code}：{detail[:400] or '请求失败，请检查地址、模型、密钥与额度。'}")
     try:
         data = response.json()

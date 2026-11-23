@@ -9,6 +9,7 @@ var CodexPDFTranslate = {
   workerPath: "",
   settings: {},
   progressViews: new Map(),
+  metadataViews: new Map(),
   attentionJobs: new Set(),
   readerButtons: new Set(),
   uiPreparing: false,
@@ -27,6 +28,41 @@ var CodexPDFTranslate = {
     Zotero.Prefs.set(this.pref + name, value, true);
   },
 
+  async loadRuntimeSettings() {
+    try {
+      // Windows PowerShell 5.1 writes UTF-8 JSON with a BOM by default.
+      const text = await IOUtils.readUTF8(PathUtils.join(this.stateDir, "config.json"));
+      const value = JSON.parse(text.replace(/^\uFEFF/, ""));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("配置格式无效");
+      for (const name of ["pythonPath", "codexPath"]) {
+        if (typeof value[name] === "string") this.settings[name] = value[name].trim();
+      }
+      this.runtimeConfigError = "";
+    } catch (error) {
+      if (error.name !== "NotFoundError") {
+        this.runtimeConfigError = "运行环境配置无法读取，请重新运行 setup.ps1 或在设置中填写路径。";
+        Zotero.debug("Codex runtime configuration: " + error);
+      }
+    }
+  },
+
+  async resolvePython() {
+    // Re-read after setup: a stale or empty preference must not hide a valid install.
+    await this.loadRuntimeSettings();
+    const configured = this.getPref("pythonPath", "");
+    const standard = Zotero.isWin ? PathUtils.join(this.stateDir, "runtime", "Scripts", "python.exe")
+      : PathUtils.join(this.stateDir, "runtime", "bin", "python");
+    const candidates = [...new Set([configured, this.settings.pythonPath, standard].filter(p => typeof p === "string" && p.trim()).map(p => p.trim()))];
+    for (const path of candidates) {
+      if (!await IOUtils.exists(path)) continue;
+      const executable = Zotero.isWin ? path.replace(/python\.exe$/i, "pythonw.exe") : path;
+      if (!await IOUtils.exists(executable)) continue;
+      if (configured !== path) this.setPref("pythonPath", path);
+      return executable;
+    }
+    throw new Error(this.runtimeConfigError || "未找到可用的 Python 环境（Windows 需同时有 python.exe 和 pythonw.exe）。请运行 setup.ps1，或在设置中填写路径。");
+  },
+
   async startup() {
     const restore = this.getPref("restoreAutoDisableScopes", "");
     if (restore) {
@@ -42,16 +78,12 @@ var CodexPDFTranslate = {
     }
     this.jobsDir = PathUtils.join(this.stateDir, "jobs");
     await IOUtils.makeDirectory(this.jobsDir, { ignoreExisting: true });
-    try {
-      this.settings = await IOUtils.readJSON(PathUtils.join(this.stateDir, "config.json"));
-    } catch (error) {
-      if (!(error.name === "NotFoundError")) Zotero.debug(String(error));
-    }
+    await this.loadRuntimeSettings();
     const backend = PathUtils.join(this.stateDir, "backend", version);
     await IOUtils.makeDirectory(backend, { ignoreExisting: true });
     this.workerPath = PathUtils.join(backend, "worker.py");
     const { NetUtil } = ChromeUtils.importESModule("resource://gre/modules/NetUtil.sys.mjs");
-    for (const name of ["worker.py", "engine.py", "providers.py", "connections.py"]) {
+    for (const name of ["worker.py", "engine.py", "providers.py", "connections.py", "text.py"]) {
       const source = await new Promise((resolve, reject) => {
         NetUtil.asyncFetch({ uri: rootURI + "backend/" + name, loadUsingSystemPrincipal: true }, (input, status) => {
           if (status !== 0) return reject(new Error("无法读取插件内的 Python 后台：" + status));
@@ -112,12 +144,17 @@ var CodexPDFTranslate = {
       onShowing: (event, context) => context.setEnabled(context.items?.some(i => this.isPDF(i) || i.isRegularItem())),
       onCommand: (event, context) => this.translateItems(context.items || this.selectedItems()),
     };
+    const workspace = {
+      ...translate, l10nID: "codex-pdf-workbench-selected",
+      onCommand: (event, context) => this.openWorkbench(context.items || this.selectedItems()),
+    };
     this.menus.push(Zotero.MenuManager.registerMenu({
-      menuID: "codex-pdf-translate-item", pluginID, target: "main/library/item", menus: [translate],
+      menuID: "codex-pdf-translate-item", pluginID, target: "main/library/item", menus: [workspace, translate],
     }));
     this.menus.push(Zotero.MenuManager.registerMenu({
       menuID: "codex-pdf-translate-tools", pluginID, target: "main/menubar/tools", menus: [{
         menuType: "submenu", l10nID: "codex-pdf-translate-menu", menus: [
+          { menuType: "menuitem", l10nID: "codex-pdf-workbench", onCommand: () => this.openWorkbench() },
           { menuType: "menuitem", l10nID: "codex-pdf-translate-progress", onCommand: () => this.openProgress() },
           { menuType: "menuitem", l10nID: "codex-pdf-translate-selected", onCommand: () => this.translateItems(this.selectedItems()) },
           { menuType: "menuitem", l10nID: "codex-pdf-translate-settings", onCommand: () => this.openSettings() },
@@ -128,8 +165,21 @@ var CodexPDFTranslate = {
     }));
   },
 
+  openWorkbench(items = null) {
+    if (!this.workbench || this.workbench.closed) {
+      const owner = Zotero.getMainWindow();
+      if (!owner) return;
+      this.workbench = owner.openDialog("chrome://codex-pdf-translate/content/workbench.xhtml",
+        "codex-pdf-workbench", "chrome,centerscreen,resizable,nonmodal,width=1060,height=740", this);
+    } else this.workbench.focus();
+    if (items) return this.translateItems(items, true, true).catch(() => {
+      // The submission has recorded its error for the workbench.
+    });
+  },
+
   onWindow(window) {
     window.MozXULElement?.insertFTLIfNeeded("codex-pdf-translate.ftl");
+    if (!this.metadataViews.has(window)) this.metadataViews.set(window, CodexPDFMetadata.attach(window, this));
     if (!this.progressViews.has(window)) {
       const view = CodexPDFProgress.attach(window, this);
       if (view) this.progressViews.set(window, view);
@@ -138,6 +188,8 @@ var CodexPDFTranslate = {
   },
 
   removeWindow(window) {
+    this.metadataViews.get(window)?.destroy();
+    this.metadataViews.delete(window);
     this.progressViews.get(window)?.destroy();
     this.progressViews.delete(window);
   },
@@ -217,24 +269,85 @@ var CodexPDFTranslate = {
       model: typeof connections.codexModel === "string" ? connections.codexModel : this.getPref("model", ""),
       requestTimeout: 300,
       batchSize: 16, batchChars: 24000, batchWindow: 0.8,
-      parallelBatches: 2, batchRetries: 2, reasoningEffort: "medium",
+      parallelBatches: 2, batchRetries: 2, reasoningEffort: connections.codexReasoningEffort || "medium",
     };
     if (connections.selected && connections.selected !== "codex") {
       const profile = connections.apis.find(p => p.id === connections.selected);
       if (!profile) throw new Error("请先在设置中保存 API 连接，或选择 Codex。");
       Object.assign(config, { provider: "api", providerName: profile.name, baseUrl: profile.baseUrl,
         model: profile.model, credentialRef: profile.credentialRef || "", stateDir: this.stateDir,
-        maxOutputTokens: profile.maxOutputTokens || 8192, batchSize: 8, batchChars: 12000 });
+        apiReasoningEffort: profile.reasoningEffort || "provider-default", maxOutputTokens: profile.maxOutputTokens || 8192,
+        batchSize: 8, batchChars: 12000 });
     } else if (connections.codexMode === "isolated") config.codexHome = PathUtils.join(this.stateDir, "codex-auth");
     return config;
   },
 
-  translateItems(items, silent = false) {
+  translateItems(items, silent = false, reportEmptySelection = false) {
     // Serialize before the first await: two clicks must never pass the same lookup concurrently.
     if (!silent) { this.uiPreparing = true; this.openProgress(); }
-    const task = this.submissionTail.catch(e => Zotero.logError(e)).then(() => this._translateItems(items, silent));
+    const task = this.submissionTail.catch(e => Zotero.logError(e)).then(() => this._translateItems(items, silent, reportEmptySelection));
     this.submissionTail = task;
     return task;
+  },
+
+  translateFiles(paths, pages, outputMode) {
+    const task = this.submissionTail.catch(e => Zotero.logError(e))
+      .then(async () => {
+        const results = [], errors = [];
+        const options = this.requestOptions(pages, outputMode);
+        for (const inputPath of new Set(paths)) {
+          const title = PathUtils.filename(inputPath);
+          try {
+            if (!/\.pdf$/i.test(title) || !await IOUtils.exists(inputPath) || (await IOUtils.stat(inputPath)).type !== "regular") {
+              throw new Error("请选择可读取的本机 PDF 文件。");
+            }
+            const request = { ...options, localFile: true, libraryID: null, title, inputPath,
+              stateDir: this.stateDir, createdAt: Date.now() };
+            await this.fingerprint(request);
+            if (!request.sourceFingerprint) throw new Error("无法读取 PDF 文件。");
+            const matches = await this.matchingJobs(request);
+            const wanted = CodexPDFIdentity.kinds(request.outputMode);
+            let reused = null;
+            for (const previous of matches) {
+              const kinds = CodexPDFIdentity.kinds(previous.request.outputMode);
+              if (!wanted.every(kind => kinds.includes(kind))) continue;
+              if (!this.isTerminal(previous.state)) { reused = previous; break; }
+              if (previous.state === "succeeded") {
+                const available = [];
+                for (const output of previous.outputs || []) {
+                  if (await IOUtils.exists(output.path)) available.push(output.kind);
+                }
+                if (wanted.every(kind => available.includes(kind))) { reused = previous; break; }
+              }
+            }
+            results.push({ title, inputPath, job: reused || await this.enqueue(request), reused: !!reused });
+          } catch (error) {
+            errors.push(title + "：" + error.message);
+          }
+        }
+        await this.tick();
+        return { results, errors };
+      });
+    this.submissionTail = task;
+    return task;
+  },
+
+  requestOptions(pages = this.getPref("pages", ""), outputMode = this.getPref("outputMode", "both")) {
+    if (!["both", "mono", "dual"].includes(outputMode)) throw new Error("请选择输出格式。");
+    return { langIn: this.getPref("langIn", "en"), langOut: this.getPref("langOut", "zh"),
+      outputMode, pages: CodexPDFIdentity.pages(pages), config: this.config() };
+  },
+
+  async enqueue(request) {
+    const id = Zotero.Utilities.randomString(12);
+    request.id = id;
+    const directory = PathUtils.join(this.jobsDir, id);
+    await IOUtils.makeDirectory(directory);
+    const job = { request, directory, state: "queued", message: "等待翻译", process: null };
+    await IOUtils.writeJSON(PathUtils.join(directory, "request.json"), request);
+    await IOUtils.writeJSON(PathUtils.join(directory, "status.json"), { state: "queued", message: "等待翻译" });
+    this.jobs.set(id, job);
+    return job;
   },
 
   async fingerprint(request, directory) {
@@ -290,7 +403,7 @@ var CodexPDFTranslate = {
     return result;
   },
 
-  async _translateItems(items, silent = false) {
+  async _translateItems(items, silent = false, reportEmptySelection = false) {
     this.uiPreparing = true;
     this.lastUIError = "";
     this.lastUINotice = "";
@@ -307,7 +420,7 @@ var CodexPDFTranslate = {
           }
         }
       }
-      if (!ids.size && !silent) throw new Error("请选择英文 PDF 附件，或包含 PDF 的文献条目。");
+      if (!ids.size && (!silent || reportEmptySelection)) throw new Error("请选择 PDF 附件，或包含 PDF 的文献条目。");
       for (const id of ids) {
         const item = Zotero.Items.get(id);
         const inputPath = await item.getFilePathAsync();
@@ -317,9 +430,7 @@ var CodexPDFTranslate = {
           inputPath, sourceItemID: id, sourceItemKey: item.key, libraryID: item.libraryID,
           parentItemID: item.parentID || null, collections: item.parentID ? [] : item.getCollections(),
           title: item.getField("title"), stateDir: this.stateDir, createdAt: Date.now(),
-          langIn: this.getPref("langIn", "en"), langOut: this.getPref("langOut", "zh"),
-          outputMode: this.getPref("outputMode", "both"), pages: CodexPDFIdentity.pages(this.getPref("pages", "")),
-          config: this.config(), importedPaths: {},
+          ...this.requestOptions(), importedPaths: {},
         };
         await this.fingerprint(request);
         const matches = await this.matchingJobs(request);
@@ -348,21 +459,15 @@ var CodexPDFTranslate = {
           if (!silent) this.showJobProgress(retry);
           continue;
         }
-        const idString = Zotero.Utilities.randomString(12);
-        request.id = idString;
-        const directory = PathUtils.join(this.jobsDir, idString);
-        await IOUtils.makeDirectory(directory);
-        const job = { request, directory, state: "queued", message: "等待翻译", process: null };
-        await IOUtils.writeJSON(PathUtils.join(directory, "request.json"), request);
-        await IOUtils.writeJSON(PathUtils.join(directory, "status.json"), { state: "queued", message: "等待翻译" });
-        this.jobs.set(idString, job);
+        const job = await this.enqueue(request);
         if (!silent) this.showJobProgress(job);
       }
       await this.tick();
     } catch (error) {
       Zotero.logError(error);
       this.lastUIError = error.message;
-      this.notify("无法开始翻译", error.message, true);
+      if (!reportEmptySelection) this.notify("无法开始翻译", error.message, true);
+      if (reportEmptySelection) throw error;
     } finally { this.uiPreparing = false; this.refreshProgress(); }
   },
 
@@ -376,7 +481,7 @@ var CodexPDFTranslate = {
   },
 
   async reuseCompleted(job) {
-    if (job.request.doctor) return false;
+    if (job.request.doctor || job.request.localFile) return false;
     await this.fingerprint(job.request, job.directory);
     const available = {};
     for (const previous of await this.matchingJobs(job.request)) {
@@ -407,8 +512,8 @@ var CodexPDFTranslate = {
     // Recovery keeps the originally selected provider. Switching the UI affects new jobs.
     const previous = job.request.config || {};
     job.request.config = { codexPath: this.getPref("codexPath", this.settings.codexPath || ""),
-      provider: "codex", providerName: "Codex", model: "", ...previous,
-      requestTimeout: 300, parallelBatches: 2, batchRetries: 2, reasoningEffort: "medium",
+      provider: "codex", providerName: "Codex", model: "", reasoningEffort: "medium", ...previous,
+      requestTimeout: 300, parallelBatches: 2, batchRetries: 2,
       batchSize: previous.provider === "api" ? 8 : 16, batchChars: previous.provider === "api" ? 12000 : 24000, batchWindow: 0.8 };
     if (automatic) job.request.autoRetries = (job.request.autoRetries || 0) + 1;
     job.state = automatic ? "waiting_retry" : "queued";
@@ -439,7 +544,7 @@ var CodexPDFTranslate = {
         }
         const job = { request, directory, ...status, process: null, notified: this.isTerminal(status.state) };
         this.jobs.set(request.id, job);
-        if (["running", "queued", "waiting_retry", "succeeded"].includes(status.state)) this.attentionJobs.add(request.id);
+        if (["running", "queued", "waiting_retry"].includes(status.state) || status.state === "succeeded" && !request.localFile) this.attentionJobs.add(request.id);
       } catch (error) { Zotero.debug("Codex job recovery: " + error); }
     }
     this.jobs = new Map([...this.jobs].sort(([, a], [, b]) => (a.request.createdAt || 0) - (b.request.createdAt || 0)));
@@ -450,13 +555,7 @@ var CodexPDFTranslate = {
 
   async launch(job, action = "translate") {
     if (action === "translate" && await this.reuseCompleted(job)) return;
-    let python = this.getPref("pythonPath", this.settings.pythonPath || "");
-    if (!python || !await IOUtils.exists(python)) throw new Error("请先运行安装包中的 setup.ps1 配置 Python 环境，或在设置页填写 Python 路径。");
-    if (Zotero.isWin && /python\.exe$/i.test(python)) {
-      const guiPython = python.replace(/python\.exe$/i, "pythonw.exe");
-      if (!await IOUtils.exists(guiPython)) throw new Error("当前 Python 缺少 pythonw.exe 无窗口启动器，请重新运行 setup.ps1。");
-      python = guiPython;
-    }
+    const python = await this.resolvePython();
     const file = Zotero.File.pathToFile(python);
     const process = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
     process.init(file);
@@ -468,7 +567,7 @@ var CodexPDFTranslate = {
     job.startedAt = Date.now();
     job.message = action === "doctor" ? "检查 Codex 在线连接" : "启动 PDF 翻译";
     job.launcherPath = python;
-    this.showJobProgress(job);
+    if (!job.request.localFile && (!this.workbench || this.workbench.closed)) this.showJobProgress(job);
     this.updateJobProgress(job);
   },
 
@@ -503,11 +602,13 @@ var CodexPDFTranslate = {
             await this.requeue(job, true);
             continue;
           }
-          if (job.state === "succeeded" && !job.request.doctor) await this.importOutputs(job);
+          if (job.state === "succeeded" && !job.request.doctor && !job.request.localFile) await this.importOutputs(job);
           this.updateJobProgress(job);
           if (this.isTerminal(job.state) && !job.notified) {
             job.notified = true;
-            this.notify(job.state === "imported" ? "译文已加入 Zotero" : "Codex PDF 翻译", job.message, job.state === "failed");
+            if (!this.workbench || this.workbench.closed) {
+              this.notify(job.state === "imported" ? "译文已加入 Zotero" : "Codex PDF 翻译", job.message, job.state === "failed");
+            }
           }
         } catch (error) {
           job.message = "挂回或读取任务失败：" + error.message;
@@ -522,7 +623,12 @@ var CodexPDFTranslate = {
         catch (error) {
           next.state = "failed";
           next.message = error.message;
-          await IOUtils.writeJSON(PathUtils.join(next.directory, "status.json"), { state: "failed", message: error.message });
+          next.finishedAt = Date.now() / 1000;
+          next.retryable = false;
+          next.notified = true;
+          await IOUtils.writeJSON(PathUtils.join(next.directory, "status.json"), {
+            state: "failed", message: error.message, finishedAt: next.finishedAt, retryable: false,
+          });
           this.updateJobProgress(next);
           this.notify("翻译环境未就绪", error.message, true);
         }
@@ -659,6 +765,7 @@ var CodexPDFTranslate = {
   },
 
   async shutdown() {
+    this.workbench?.close();
     if (this.connections) await this.connections.stop();
     if (this.timer) clearInterval(this.timer);
     if (this.observerID) Zotero.Notifier.unregisterObserver(this.observerID);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Codex PDF 翻译",
-  "version": "0.4.0",
+  "version": "0.6.2",
   "description": "选择 Codex 登录或兼容 API 翻译 PDF，通过 BabelDOC 保留论文版式。",
   "author": "Local Research Tools",
   "applications": {

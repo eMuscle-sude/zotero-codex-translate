@@ -27,9 +27,9 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from providers import api_completion, api_key_for, codex_environment
+from providers import api_completion, api_key_for, codex_environment, reasoning_effort
 
-VERSION = "0.4.0"
+VERSION = "0.6.2"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 PROMPT_VERSION = "pdf-translation-v1"
 
@@ -170,7 +170,7 @@ def resolve_codex(configured: str = "") -> str:
         path = Path(configured)
         if path.is_file():
             return str(path.resolve())
-        raise FileNotFoundError(f"Codex CLI 不存在：{configured}")
+        # Desktop upgrades replace their versioned bin folder; discover the new CLI.
     found = shutil.which("codex.exe") or shutil.which("codex")
     if found:
         return found
@@ -178,7 +178,8 @@ def resolve_codex(configured: str = "") -> str:
     candidates = sorted(root.glob("*/codex.exe"), key=lambda p: p.stat().st_mtime, reverse=True)
     if candidates:
         return str(candidates[0])
-    raise FileNotFoundError("未找到 Codex CLI。请先安装 Codex CLI，并运行 codex login。")
+    detail = f"（原路径已失效：{configured}）" if configured else ""
+    raise FileNotFoundError("未找到 Codex CLI" + detail + "。请先安装 Codex CLI，并在模型连接中登录。")
 
 
 def codex_command(executable: str, directory: Path, schema: Path, answer: Path, model: str = "", config=None) -> list[str]:
@@ -189,7 +190,7 @@ def codex_command(executable: str, directory: Path, schema: Path, answer: Path, 
                "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "hooks",
                "--disable", "apps", "--disable", "plugins", "--disable", "multi_agent",
                "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
-               "-c", 'model_reasoning_effort="medium"', "-C", str(directory),
+               "-c", f'model_reasoning_effort="{reasoning_effort(config or {})}"', "-C", str(directory),
                "--output-schema", str(schema), "--output-last-message", str(answer)]
     if model:
         command += ["--model", model]
@@ -349,6 +350,9 @@ class TranslationBridge:
             raise RuntimeError(str(self.fatal))
         identity = self.config.get("model", "") if self.provider == "codex" else {
             "provider": "api", "baseUrl": self.config.get("baseUrl", ""), "model": self.config.get("model", "")}
+        effort = reasoning_effort(self.config)
+        if effort != ("medium" if self.provider == "codex" else "provider-default"):
+            identity = {"connection": identity, "reasoningEffort": effort}
         payload = json.dumps([PROMPT_VERSION, identity, task], sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         with self.cache_lock:
@@ -537,7 +541,7 @@ def translate_pdf(request_path: Path):
         state_dir = Path(request.get("stateDir", str(directory.parent.parent)))
         config.setdefault("stateDir", str(state_dir))
         status.update(provider=config.get("provider", "codex"), providerName=config.get("providerName", "Codex"),
-                      reasoningEffort="medium" if config.get("provider", "codex") == "codex" else "provider-default")
+                      reasoningEffort=reasoning_effort(config))
         bridge = TranslationBridge(directory, state_dir, config, status)
         output = directory / "output"
         output.mkdir(exist_ok=True)
@@ -609,8 +613,10 @@ def translate_pdf(request_path: Path):
                 files.append({"path": str(path), "kind": kind, "pages": len(translated)})
         if {entry["kind"] for entry in files} != expected:
             raise RuntimeError("引擎未生成完整的目标 PDF。请检查 babeldoc.log。")
-        status.update(state="succeeded", message="翻译完成，等待 Zotero 挂回附件", outputs=files,
-                      progress=99, stage="importing", stageLabel="等待挂回附件",
+        local = request.get("localFile") is True
+        status.update(state="succeeded", message="译文已保存，可在工作台打开。" if local else "翻译完成，等待 Zotero 挂回附件", outputs=files,
+                      progress=100 if local else 99, stage="complete" if local else "importing",
+                      stageLabel="已完成" if local else "等待挂回附件",
                       sourcePages=source_pages, finishedAt=time.time())
     except Cancelled as exc:
         status.update(state="cancelled", message=str(exc), finishedAt=time.time())
@@ -631,7 +637,7 @@ def doctor(config: dict, directory: Path, online=False, status=None) -> dict:
     status.provider_config = config
     provider = config.get("provider", "codex")
     status.update(provider=provider, providerName=config.get("providerName", "Codex" if provider == "codex" else "API"),
-                  reasoningEffort="medium" if provider == "codex" else "provider-default")
+                  reasoningEffort=reasoning_effort(config))
     executable = ""
     if provider == "codex":
         executable = resolve_codex(config.get("codexPath", ""))

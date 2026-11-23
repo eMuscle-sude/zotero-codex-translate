@@ -8,6 +8,7 @@ credentials/
 codex-auth/
 control/
 connection-tests/
+text-translations/
 connections.json
 config.json
 auth.json

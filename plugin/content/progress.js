@@ -5,7 +5,7 @@ var CodexPDFProgress = {
 
   model(job, now = Date.now()) {
     const state = job.state;
-    const done = state === "imported" || (state === "succeeded" && job.request?.doctor);
+    const done = state === "imported" || (state === "succeeded" && (job.request?.doctor || job.request?.localFile));
     const raw = String(job.stage || "");
     let step = "preparing", label = "准备翻译";
     if (state === "queued") { step = "queued"; label = "等待翻译"; }
@@ -157,7 +157,8 @@ var CodexPDFProgress = {
           title.title = m.title;
           const phase = node("div", "ct-phase");
           phase.dataset.state = m.state;
-          phase.append(node("span", "ct-stage", m.label), node("strong", "ct-percent", m.percent === null ? (m.state === "queued" ? "排队中" : "运行中") : `${m.percent}%`));
+          phase.append(node("span", "ct-stage", m.label), node("strong", "ct-percent", m.percent === null
+            ? (m.terminal ? "已停止" : m.state === "queued" ? "排队中" : "运行中") : `${m.percent}%`));
           const track = node("div", "ct-track");
           track.dataset.state = m.state;
           track.dataset.indeterminate = String(m.percent === null && !m.terminal);

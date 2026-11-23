@@ -15,8 +15,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from providers import CredentialVault, ProviderError, atomic_settings, codex_environment, config_for_connection, is_local_api, load_connections, normalize_url
+from providers import (API_EFFORTS, CODEX_EFFORTS, CredentialVault, ProviderError, atomic_settings,
+                       codex_environment, config_for_connection, is_local_api, load_connections, normalize_url)
 from worker import CREATE_NO_WINDOW, VERSION, Status, doctor, resolve_codex, stop_process
+from text import TextTranslations
 
 
 class Connections:
@@ -33,6 +35,11 @@ class Connections:
         self.refreshing = False
         self.test = {"state": "idle"}
         self.test_status = None
+        self.text = TextTranslations(self.state_dir, self.text_config)
+
+    def text_config(self):
+        with self.lock:
+            return config_for_connection(self.value, self.state_dir, self.codex_path)
 
     def save(self):
         atomic_settings(self.state_dir / "connections.json", self.value)
@@ -46,7 +53,7 @@ class Connections:
             return {"connections": settings, "codex": copy.deepcopy(self.accounts),
                     "login": copy.deepcopy(self.login), "test": copy.deepcopy(self.test)}
 
-    def probe_account(self, mode):
+    def probe_account(self, mode, timeout=20):
         try:
             executable = resolve_codex(self.codex_path)
             config = {"codexHome": str(self.state_dir / "codex-auth")} if mode == "isolated" else {}
@@ -54,7 +61,7 @@ class Connections:
                 return {"available": True, "loggedIn": False, "checking": False, "kind": "none"}
             args = [executable, "login", "status"] + (["-c", 'cli_auth_credentials_store="file"'] if mode == "isolated" else [])
             result = subprocess.run(args, capture_output=True, encoding="utf-8",
-                errors="replace", timeout=20, creationflags=CREATE_NO_WINDOW, env=codex_environment(config))
+                errors="replace", timeout=timeout, creationflags=CREATE_NO_WINDOW, env=codex_environment(config))
             text = result.stdout + result.stderr
             return {"available": True, "loggedIn": result.returncode == 0, "checking": False,
                     "kind": "chatgpt" if "ChatGPT" in text else "api-key" if "API key" in text else "none"}
@@ -95,6 +102,9 @@ class Connections:
         with self.lock:
             old = next((p for p in self.value["apis"] if p["id"] == data.get("id")), None)
             profile = dict(old or {"id": "api-" + secrets.token_hex(8)})
+            effort = data.get("reasoningEffort", profile.get("reasoningEffort", "provider-default"))
+            if effort not in API_EFFORTS:
+                raise ValueError("请选择有效的 API 思考强度。")
             key = str(data.get("apiKey", "")).strip()
             if key:
                 reference = self.vault.save(key, base)
@@ -105,7 +115,7 @@ class Connections:
                 profile["credentialRef"] = ""
             if not profile.get("credentialRef") and not is_local_api(base):
                 raise ValueError("请填写此服务的 API Key；本机服务允许留空。")
-            profile.update(name=name, model=model, baseUrl=base, maxOutputTokens=max_output)
+            profile.update(name=name, model=model, baseUrl=base, maxOutputTokens=max_output, reasoningEffort=effort)
             self.value["apis"] = [profile if p["id"] == profile["id"] else p for p in self.value["apis"]]
             if not old:
                 self.value["apis"].append(profile)
@@ -126,13 +136,102 @@ class Connections:
             self.save()
 
     def use_shared(self):
-        account = self.probe_account("shared")
-        self.accounts["shared"] = account
+        self.use_codex("shared")
+
+    def use_codex(self, mode):
+        account = self.probe_account(mode)
+        self.accounts[mode] = account
         if not account["loggedIn"]:
-            raise ValueError(account.get("message", "本机 Codex 尚未登录，请点击“浏览器登录”。"))
+            raise ValueError(account.get("message", "此方式尚未登录，请点击“浏览器登录”。"))
         with self.lock:
-            self.value.update(selected="codex", codexMode="shared")
+            self.value.update(selected="codex", codexMode=mode)
             self.save()
+
+    def login_with_secret(self, mode, secret):
+        flag = {"token": "--with-access-token", "key": "--with-api-key"}.get(mode)
+        if not flag:
+            raise ValueError("请选择凭据类型。")
+        if not isinstance(secret, str) or not 0 < len(secret.strip()) <= 12000 or any(char.isspace() for char in secret.strip()):
+            raise ValueError("请填写一行有效的登录凭据。")
+        executable = resolve_codex(self.codex_path)
+        home = self.state_dir / "codex-auth"
+        home.mkdir(parents=True, exist_ok=True)
+        with self.lock:
+            if self.login.get("state") in {"starting", "waiting"}:
+                raise ValueError("已有 Codex 登录正在进行。")
+            self.login = {"state": "starting", "message": "正在验证 Codex 凭据…"}
+            self.login_cancel = threading.Event()
+        failure = "Codex 未接受此凭据。请检查凭据类型、有效期和 CLI 版本。"
+        try:
+            # Credentials are passed through stdin only. Do not record the CLI output.
+            with self.lock:
+                if self.login_cancel.is_set():
+                    raise ProviderError("已取消登录。")
+                process = subprocess.Popen([executable, "login", "-c", 'cli_auth_credentials_store="file"', flag],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=codex_environment({"codexHome": str(home)}), creationflags=CREATE_NO_WINDOW)
+                self.login_process = process
+            try:
+                process.communicate(input=(secret.strip() + "\n").encode("utf-8"), timeout=22)
+            except subprocess.TimeoutExpired:
+                stop_process(process)
+                raise ProviderError("验证凭据超时，请检查网络后重试。") from None
+            if self.login_cancel.is_set():
+                raise ProviderError("已取消登录。")
+            if process.returncode:
+                raise ProviderError(failure)
+            account = self.probe_account("isolated", timeout=6)
+            if not account["loggedIn"]:
+                raise ProviderError(failure)
+            with self.lock:
+                if self.login_cancel.is_set():
+                    raise ProviderError("已取消登录。")
+                self.accounts["isolated"] = account
+                self.value.update(selected="codex", codexMode="isolated")
+                self.save()
+                self.login = {"state": "succeeded", "message": "Codex 已登录，可使用此插件独立连接。"}
+        except (OSError, ProviderError) as error:
+            message = str(error) if isinstance(error, ProviderError) else failure
+            with self.lock:
+                self.login = {"state": "cancelled" if self.login_cancel.is_set() else "failed", "message": message}
+            raise ProviderError(message) from None
+        finally:
+            self.login_process = None
+
+    def list_api_models(self, data):
+        import httpx
+
+        base = normalize_url(str(data.get("baseUrl", "")))
+        key = str(data.get("apiKey", "")).strip()
+        if key and (len(key) > 8192 or any(char.isspace() for char in key)):
+            raise ValueError("API Key 格式无效。")
+        if not key:
+            with self.lock:
+                profile = next((p for p in self.value["apis"] if p["id"] == data.get("id")), None)
+                if profile and profile["baseUrl"] == base and profile.get("credentialRef"):
+                    key = self.vault.read(profile["credentialRef"], base)
+        local = is_local_api(base)
+        if not key and not local:
+            raise ValueError("请先填写 API Key，再获取此账号的模型列表。")
+        try:
+            headers = {"Authorization": "Bearer " + key} if key else {}
+            with httpx.Client(timeout=12, follow_redirects=False, trust_env=not local) as client:
+                with client.stream("GET", base + "/models", headers=headers) as response:
+                    if response.status_code != 200:
+                        raise ProviderError(f"模型列表请求失败（HTTP {response.status_code}）。可手动填写模型 ID。")
+                    body = bytearray()
+                    for chunk in response.iter_bytes():
+                        body.extend(chunk)
+                        if len(body) > 2_000_000:
+                            raise ProviderError("模型列表太大，请手动填写模型 ID。")
+            records = json.loads(body).get("data", [])
+            models = {row["id"] for row in records if isinstance(row, dict) and isinstance(row.get("id"), str)
+                and 0 < len(row["id"]) <= 200 and (not key or key not in row["id"]) and not any(ord(c) < 32 for c in row["id"])}
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            raise ProviderError("无法获取模型列表，请检查连接或手动填写模型 ID。") from None
+        if not models:
+            raise ProviderError("此接口没有返回模型，请手动填写模型 ID。")
+        return {"models": sorted(models)[:2000]}
 
     def cancel_login(self):
         self.login_cancel.set()
@@ -218,17 +317,27 @@ class Connections:
         threading.Thread(target=run, daemon=True).start()
 
     def action(self, route, data):
+        if route == "/api/models": return self.list_api_models(data)
+        if route == "/text/start": return self.text.start(data)
+        if route == "/text/status": return self.text.state(data.get("id"))
+        if route == "/text/cancel": return self.text.cancel(data.get("id"))
         if route == "/refresh": self.refresh()
         elif route == "/select": self.select(data.get("id", "codex"))
         elif route == "/api/save": self.save_api(data)
         elif route == "/api/remove": self.remove_api(data.get("id"))
         elif route == "/codex/shared": self.use_shared()
+        elif route == "/codex/isolated": self.use_codex("isolated")
+        elif route == "/codex/secret": self.login_with_secret(data.get("mode"), data.get("secret"))
         elif route == "/codex/login": self.start_login(bool(data.get("device")))
         elif route == "/codex/cancel": self.cancel_login()
         elif route == "/codex/logout": self.logout()
         elif route == "/codex/model":
-            self.value["codexModel"] = str(data.get("model", "")).strip()[:200]
-            self.save()
+            with self.lock:
+                effort = data.get("reasoningEffort", self.value["codexReasoningEffort"])
+                if effort not in CODEX_EFFORTS:
+                    raise ValueError("请选择有效的 Codex 思考强度。")
+                self.value.update(codexModel=str(data.get("model", "")).strip()[:200], codexReasoningEffort=effort)
+                self.save()
         elif route == "/test": self.start_test()
         elif route == "/test/cancel":
             if self.test_status: self.test_status.stop_event.set()
@@ -236,6 +345,7 @@ class Connections:
         return self.public_state()
 
     def close(self):
+        self.text.close()
         self.cancel_login()
         if self.test_status:
             self.test_status.stop_event.set()
